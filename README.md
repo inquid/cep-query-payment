@@ -31,7 +31,7 @@ This library provides a simple interface to query the SPEI payment system throug
 1. The package is available in composer. Run composer install:
 
 ```bash
-composer install carlosupreme/cep-query-payment
+composer require carlosupreme/cep-query-payment
 ```
 
 2. Install Node.js dependencies:
