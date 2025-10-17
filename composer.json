@@ -1,6 +1,6 @@
 {
     "name": "carlosupreme/cep-query-payment",
-    "description": "Automates the query of the status of a SPEI payment in Banxico using web scraping",
+    "description": "Laravel package for querying and verifying SPEI payment status from Banco de México's CEP system using automated browser scraping",
     "type": "library",
     "keywords": [
         "laravel",
