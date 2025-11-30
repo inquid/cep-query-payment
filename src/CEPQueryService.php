@@ -2,11 +2,14 @@
 
 namespace Carlosupreme\CEPQueryPayment;
 
+use Carbon\Carbon;
 use DateTime;
 use Exception;
 use GuzzleHttp\Client;
 use GuzzleHttp\Cookie\CookieJar;
 use GuzzleHttp\Exception\GuzzleException;
+
+use function Symfony\Component\Clock\now;
 
 class CEPQueryService
 {
@@ -21,10 +24,11 @@ class CEPQueryService
 
     private string $baseUri = 'https://www.banxico.org.mx';
 
-    public function __construct(?Client $httpClient = null, ?callable $logger = null)
-    {
-        $this->timeout = 60;
+    private string $timezone;
 
+    public function __construct(?Client $httpClient = null, ?callable $logger = null, string $timezone = 'America/Mexico_City') {
+        $this->timeout = 60;
+        $this->timezone = $timezone;
         $this->defaultOptions = [
             'timeout' => $this->timeout,
         ];
@@ -34,9 +38,9 @@ class CEPQueryService
             'timeout'  => $this->timeout,
             'verify'   => true,
             'headers'  => [
-                'User-Agent'        => 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/142.0.0.0 Safari/537.36',
-                'Accept'            => '*/*',
-                'X-Requested-With'  => 'XMLHttpRequest',
+                'User-Agent'       => 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/142.0.0.0 Safari/537.36',
+                'Accept'           => '*/*',
+                'X-Requested-With' => 'XMLHttpRequest',
             ],
         ]);
 
@@ -46,14 +50,13 @@ class CEPQueryService
     /**
      * Query CEP using form data via direct POST to Banxico.
      *
-     * @param  array  $formData
-     * @param  array  $options  (optional timeout override, etc.)
+     * @param array $formData
+     * @param array $options (optional timeout override, etc.)
      * @return array|null
      *
      * @throws Exception
      */
-    public function queryPayment(array $formData, array $options = []): ?array
-    {
+    public function queryPayment(array $formData, array $options = []): ?array {
         $this->validateFormData($formData);
 
         $timeout = $options['timeout'] ?? $this->timeout;
@@ -68,16 +71,16 @@ class CEPQueryService
             ]);
 
             $payload = [
-                'captcha'             => '',
-                'criterio'            => $formData['criterio'],
-                'cuenta'              => $formData['cuenta'],
-                'emisor'              => $formData['emisor'],
-                'fecha'               => $formData['fecha'],
-                'monto'               => $formData['monto'],
-                'receptor'            => $formData['receptor'],
-                'receptorParticipante'=> 0,
-                'tipoConsulta'        => 0,
-                'tipoCriterio'        => $formData['tipoCriterio'],
+                'captcha'              => '',
+                'criterio'             => $formData['criterio'],
+                'cuenta'               => $formData['cuenta'],
+                'emisor'               => $formData['emisor'],
+                'fecha'                => $formData['fecha'],
+                'monto'                => $formData['monto'],
+                'receptor'             => $formData['receptor'],
+                'receptorParticipante' => 0,
+                'tipoConsulta'         => 0,
+                'tipoCriterio'         => $formData['tipoCriterio'],
             ];
 
             $this->log('debug', 'Sending CEP request', [
@@ -88,17 +91,17 @@ class CEPQueryService
                 'cookies'     => $jar,
                 'timeout'     => $timeout,
                 'headers'     => [
-                    'Content-Type'    => 'application/x-www-form-urlencoded; charset=UTF-8',
-                    'Origin'          => $this->baseUri,
-                    'Referer'         => $this->baseUri . '/cep/',
-                    'Sec-Fetch-Site'  => 'same-origin',
-                    'Sec-Fetch-Mode'  => 'cors',
-                    'Sec-Fetch-Dest'  => 'empty',
+                    'Content-Type'   => 'application/x-www-form-urlencoded; charset=UTF-8',
+                    'Origin'         => $this->baseUri,
+                    'Referer'        => $this->baseUri . '/cep/',
+                    'Sec-Fetch-Site' => 'same-origin',
+                    'Sec-Fetch-Mode' => 'cors',
+                    'Sec-Fetch-Dest' => 'empty',
                 ],
                 'form_params' => $payload,
             ]);
 
-            $html = (string) $response->getBody();
+            $html = (string)$response->getBody();
 
             $this->log('debug', 'Raw CEP response (truncated)', [
                 'html' => mb_substr($html, 0, 2000),
@@ -137,26 +140,41 @@ class CEPQueryService
      *
      * @throws Exception
      */
-    public function getBankOptions(): array
-    {
-        $jar = new CookieJar();
+    public function getBankOptions(): array {
+        $date = Carbon::now($this->timezone)
+                      ->subDay()
+                      ->format('d-m-Y');
 
         try {
-            $response = $this->http->get('/cep/', [
-                'cookies' => $jar,
-                'timeout' => $this->timeout,
+            $response = $this->http->get('/cep/instituciones.do', [
+                'query'   => ['fecha' => $date],
                 'headers' => [
-                    'Accept' => 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+                    'Accept'     => 'application/json, text/javascript, */*; q=0.01',
+                    'User-Agent' => 'Mozilla/5.0',
                 ],
+                'timeout' => $this->timeout,
             ]);
 
-            $html = (string) $response->getBody();
+            $raw = (string)$response->getBody();
 
             $this->log('debug', 'Bank options raw page (truncated)', [
-                'html' => mb_substr($html, 0, 2000),
+                'json' => mb_substr($raw, 0, 2000),
             ]);
 
-            return $this->parseBankOptionsFromHtml($html);
+            $data = json_decode($raw, true);
+
+            if (!isset($data['instituciones']) || !is_array($data['instituciones'])) {
+                throw new Exception("Invalid instituciones format");
+            }
+
+            $banks = array_map(function ($item) {
+                return [
+                    'id'   => $item[0],
+                    'name' => $item[1],
+                ];
+            }, $data['instituciones']);
+
+            return $banks;
         } catch (GuzzleException $e) {
             $this->log('error', 'Failed to get bank options', ['error' => $e->getMessage()]);
             throw new Exception('Failed to get bank options: ' . $e->getMessage(), 0, $e);
@@ -168,8 +186,7 @@ class CEPQueryService
      *
      * @throws Exception
      */
-    private function validateFormData(array &$formData): void
-    {
+    private function validateFormData(array &$formData): void {
         $required = ['fecha', 'tipoCriterio', 'criterio', 'emisor', 'receptor', 'cuenta', 'monto'];
 
         foreach ($required as $field) {
@@ -192,7 +209,7 @@ class CEPQueryService
 
         if (preg_match('/^\d{2}\/\d{2}\/\d{4}$/', $formData['fecha'])) {
             $formData['fecha'] = str_replace('/', '-', $formData['fecha']);
-        } elseif (!preg_match('/^\d{2}-\d{2}-\d{4}$/', $formData['fecha'])) {
+        } else if (!preg_match('/^\d{2}-\d{2}-\d{4}$/', $formData['fecha'])) {
             throw new Exception('Invalid date format. Use dd-mm-yyyy or dd/mm/yyyy');
         }
 
@@ -212,8 +229,7 @@ class CEPQueryService
     /**
      * Parse CEP HTML response into a structured array.
      */
-    private function parseHtmlResponse(string $html): ?array
-    {
+    private function parseHtmlResponse(string $html): ?array {
         $html = trim($html);
         if ($html === '') {
             return null;
@@ -230,9 +246,10 @@ class CEPQueryService
         $xpath = new \DOMXPath($dom);
 
         // Specific table with payment info (matches sample HTML)
-        $table = $xpath->query("//div[@id='consultaMISPEI']//table[@id='xxx' or contains(@class,'styled-table')]")->item(0)
+        $table = $xpath->query("//div[@id='consultaMISPEI']//table[@id='xxx' or contains(@class,'styled-table')]")
+                       ->item(0)
             ?: $xpath->query("//div[@id='consultaMISPEI']//table")->item(0)
-            ?: $xpath->query('//table')->item(0);
+                ?: $xpath->query('//table')->item(0);
 
         if (!$table instanceof \DOMElement) {
             $text = trim($xpath->evaluate('string(//div[@id="consultaMISPEI"] | //div[@class="cuerpo-msg"] | //body)'));
@@ -294,48 +311,9 @@ class CEPQueryService
     }
 
     /**
-     * Parse bank options from CEP HTML page.
-     */
-    private function parseBankOptionsFromHtml(string $html): array
-    {
-        $html = trim($html);
-        if ($html === '') {
-            return [];
-        }
-
-        libxml_use_internal_errors(true);
-        $dom = new \DOMDocument('1.0', 'UTF-8');
-
-        if (!$dom->loadHTML($html, LIBXML_NOWARNING | LIBXML_NOERROR)) {
-            return [];
-        }
-
-        $xpath = new \DOMXPath($dom);
-        $select = $xpath->query('//select[@id="input_emisor"]')->item(0);
-
-        if (!$select instanceof \DOMElement) {
-            return [];
-        }
-
-        $options = [];
-        foreach ($xpath->query('.//option', $select) as $opt) {
-            /** @var \DOMElement $opt */
-            $value = trim($opt->getAttribute('value'));
-            $label = trim($opt->textContent);
-
-            if ($value !== '') {
-                $options[$value] = $label;
-            }
-        }
-
-        return $options;
-    }
-
-    /**
      * Sanitize form data for logging (mask sensitive information).
      */
-    private function sanitizeLogData(array $formData): array
-    {
+    private function sanitizeLogData(array $formData): array {
         $sanitized = $formData;
 
         if (isset($sanitized['cuenta'])) {
@@ -352,10 +330,9 @@ class CEPQueryService
     /**
      * Format date for CEP form (dd-mm-yyyy).
      *
-     * @param  string|DateTime  $date
+     * @param string|DateTime $date
      */
-    public static function formatDate($date): string
-    {
+    public static function formatDate($date): string {
         if ($date instanceof DateTime) {
             return $date->format('d-m-Y');
         }
@@ -377,14 +354,13 @@ class CEPQueryService
      *
      * @throws Exception
      */
-    public function getBankCodeByName(string $bankName): ?string
-    {
+    public function getBankCodeByName(string $bankName): ?string {
         $banks = $this->getBankOptions();
         $bankName = strtolower(trim($bankName));
 
-        foreach ($banks as $code => $name) {
-            if (str_contains(strtolower($name), $bankName)) {
-                return $code;
+        foreach ($banks as $bank) {
+            if (str_contains(strtolower($bank['name']), $bankName)) {
+                return $bank['id'];
             }
         }
 
@@ -394,8 +370,7 @@ class CEPQueryService
     /**
      * Log a message using the provided logger or do nothing.
      */
-    private function log(string $level, string $message, array $context = []): void
-    {
+    private function log(string $level, string $message, array $context = []): void {
         if ($this->logger !== null) {
             ($this->logger)($level, $message, $context);
         }
