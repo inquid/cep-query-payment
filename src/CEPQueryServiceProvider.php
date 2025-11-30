@@ -14,14 +14,7 @@ class CEPQueryServiceProvider extends ServiceProvider
     public function register(): void
     {
         $this->app->singleton(CEPQueryService::class, function ($app) {
-            $scriptPath = __DIR__.'/../resources/js/cep-form-filler.js';
-
-            // Create logger callback that uses Laravel's Log facade
-            $logger = function (string $level, string $message, array $context = []) {
-                Log::$level($message, $context);
-            };
-
-            return new CEPQueryService($scriptPath, $logger);
+            return new CEPQueryService();
         });
 
         // Alias for backward compatibility
