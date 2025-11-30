@@ -21,6 +21,9 @@ This document describes the architecture and design of the CEP Query Service lib
 │  │  ┌─────────────────────────────────────────────────┐     │  │
 │  │  │  Public Methods:                                │     │  │
 │  │  │  • queryPayment(array, array): ?array           │     │  │
+│  │  │  • downloadPaymentFile(array, string, array): string │  │
+│  │  │  • getPaymentDetails(array, array): array       │     │  │
+│  │  │  • parsePaymentXml(string): array               │     │  │
 │  │  │  • getBankOptions(): array                      │     │  │
 │  │  │  • getBankCodeByName(string): ?string           │     │  │
 │  │  │  • formatDate(mixed): string [static]           │     │  │
@@ -97,6 +100,64 @@ User Request
     └─> Return Bank Codes
 ```
 
+### Download Payment File Flow
+
+```
+User Request
+    │
+    ├─> CEPQueryService::downloadPaymentFile($formData, $format, $options)
+    │       │
+    │       ├─> validateFormData()              [Validate input]
+    │       │
+    │       ├─> HTTP GET /cep/                  [Warm up session]
+    │       │
+    │       ├─> HTTP POST /cep/descarga.do?formato={format}
+    │       │       │                          [Submit form]
+    │       │       │
+    │       │       └─> Receive file content (XML/PDF/ZIP)
+    │       │
+    │       ├─> log()                          [Log download]
+    │       │
+    │       └─> return string (raw content)
+    │
+    └─> Return File Content
+```
+
+### Get Payment Details Flow
+
+```
+User Request
+    │
+    ├─> CEPQueryService::getPaymentDetails($formData, $options)
+    │       │
+    │       ├─> downloadPaymentFile($formData, 'XML')
+    │       │       │
+    │       │       └─> Receive XML content
+    │       │
+    │       ├─> parsePaymentXml($xmlContent)
+    │       │       │
+    │       │       ├─> simplexml_load_string()  [Parse XML]
+    │       │       │
+    │       │       ├─> Extract operation details
+    │       │       │   ├─ date, time, SPEI key
+    │       │       │   └─ tracking key, certificate
+    │       │       │
+    │       │       ├─> Extract beneficiary details
+    │       │       │   ├─ name, bank, account
+    │       │       │   ├─ RFC, CURP
+    │       │       │   └─ amount, concept
+    │       │       │
+    │       │       ├─> Extract sender details
+    │       │       │   ├─ name, bank, account
+    │       │       │   └─ RFC, CURP
+    │       │       │
+    │       │       └─> return structured array
+    │       │
+    │       └─> log()                          [Log success]
+    │
+    └─> Return Payment Details
+```
+
 ## Class Diagram
 
 ```
@@ -112,6 +173,9 @@ User Request
 ├─────────────────────────────────────────────────────────┤
 │ + __construct(?Client, ?callable, string)               │
 │ + queryPayment(array, array): ?array                    │
+│ + downloadPaymentFile(array, string, array): string     │
+│ + getPaymentDetails(array, array): array                │
+│ + parsePaymentXml(string): array                        │
 │ + getBankOptions(): array                               │
 │ + getBankCodeByName(string): ?string                    │
 │ + static formatDate(DateTime|string): string            │
@@ -372,6 +436,24 @@ CEPQueryService
             └─> For logging functionality
 ```
 
+## New Features (v1.1.0)
+
+### File Download Capabilities
+
+The service now supports downloading payment files in multiple formats:
+- **XML**: Structured payment data with all details
+- **PDF**: Official formatted payment receipt
+- **ZIP**: Compressed archive with payment documents
+
+### Payment Details Extraction
+
+Automatic parsing of XML responses to extract:
+- **Operation Details**: Date, time, SPEI key, tracking key, certificate
+- **Beneficiary Information**: Name, bank, account, RFC, CURP, amount
+- **Sender Information**: Name, bank, account, RFC, CURP
+
+This enables automated verification and data collection for accounting systems.
+
 ## Future Architecture Improvements
 
 1. **Queue Support**: Async job processing
@@ -382,8 +464,10 @@ CEPQueryService
 6. **Metrics Collection**: Performance tracking
 7. **Event System**: Hook points for extensions
 8. **Plugin Architecture**: Third-party extensions
+9. **Batch Processing**: Download multiple payment files in parallel
+10. **Data Validation**: Verify digital signatures on XML files
 
 ---
 
-**Document Version**: 1.0.0
-**Last Updated**: 17 October 2025 
+**Document Version**: 1.1.0
+**Last Updated**: 30 November 2025 
