@@ -9,6 +9,8 @@ This library provides a simple interface to query the SPEI payment system throug
 ## Features
 
 - ✅ Query payment status using tracking key or reference number
+- ✅ Download payment files (XML, PDF, ZIP)
+- ✅ Extract detailed payment information from XML (RFC, CURP, names)
 - ✅ Retrieve available bank options from CEP system
 - ✅ Automatic form validation and data sanitization
 - ✅ Lightweight HTTP-based approach (no browser required)
@@ -108,6 +110,75 @@ class PaymentController extends Controller
             'data' => $result,
         ]);
     }
+
+    public function getPaymentDetails(Request $request)
+    {
+        $formData = [
+            'fecha' => CEPQueryService::formatDate($request->payment_date),
+            'tipoCriterio' => 'T',
+            'criterio' => $request->tracking_key,
+            'emisor' => $request->sender_bank,
+            'receptor' => $request->receiver_bank,
+            'cuenta' => $request->clabe,
+            'monto' => $request->amount,
+        ];
+
+        try {
+            $details = $this->cepService->getPaymentDetails($formData);
+
+            return response()->json([
+                'success' => true,
+                'sender' => $details['sender'],
+                'beneficiary' => $details['beneficiary'],
+                'operation' => $details['operation'],
+            ]);
+        } catch (Exception $e) {
+            return response()->json([
+                'success' => false,
+                'error' => $e->getMessage(),
+            ], 400);
+        }
+    }
+
+    public function downloadPaymentFile(Request $request)
+    {
+        $formData = [
+            'fecha' => CEPQueryService::formatDate($request->payment_date),
+            'tipoCriterio' => 'T',
+            'criterio' => $request->tracking_key,
+            'emisor' => $request->sender_bank,
+            'receptor' => $request->receiver_bank,
+            'cuenta' => $request->clabe,
+            'monto' => $request->amount,
+        ];
+
+        $format = $request->format ?? 'PDF'; // XML, PDF, or ZIP
+
+        try {
+            $content = $this->cepService->downloadPaymentFile($formData, $format);
+
+            $mimeTypes = [
+                'XML' => 'application/xml',
+                'PDF' => 'application/pdf',
+                'ZIP' => 'application/zip',
+            ];
+
+            $extensions = [
+                'XML' => 'xml',
+                'PDF' => 'pdf',
+                'ZIP' => 'zip',
+            ];
+
+            return response($content)
+                ->header('Content-Type', $mimeTypes[$format])
+                ->header('Content-Disposition', "attachment; filename=payment.{$extensions[$format]}");
+        } catch (Exception $e) {
+            return response()->json([
+                'success' => false,
+                'error' => $e->getMessage(),
+            ], 400);
+        }
+    }
 }
 ```
 
@@ -130,6 +201,98 @@ $banks = $cepService->getBankOptions();
 // Find bank code by name (case-insensitive)
 $bankCode = $cepService->getBankCodeByName('BBVA');
 // Returns: '40012'
+```
+
+### Download Payment Files
+
+The service supports downloading payment files in XML, PDF, or ZIP formats:
+
+```php
+$formData = [
+    'fecha' => '15-01-2024',
+    'tipoCriterio' => 'T',
+    'criterio' => '1234567890',
+    'emisor' => '40012',
+    'receptor' => '40002',
+    'cuenta' => '012345678901234567',
+    'monto' => '1500.00',
+];
+
+// Download XML file
+$xmlContent = $cepService->downloadPaymentFile($formData, 'XML');
+file_put_contents('payment.xml', $xmlContent);
+
+// Download PDF file
+$pdfContent = $cepService->downloadPaymentFile($formData, 'PDF');
+file_put_contents('payment.pdf', $pdfContent);
+
+// Download ZIP file
+$zipContent = $cepService->downloadPaymentFile($formData, 'ZIP');
+file_put_contents('payment.zip', $zipContent);
+```
+
+### Extract Payment Details from XML
+
+Get detailed payment information including RFC, CURP, and full names:
+
+```php
+$formData = [
+    'fecha' => '15-01-2024',
+    'tipoCriterio' => 'T',
+    'criterio' => '1234567890',
+    'emisor' => '40012',
+    'receptor' => '40002',
+    'cuenta' => '012345678901234567',
+    'monto' => '1500.00',
+];
+
+$details = $cepService->getPaymentDetails($formData);
+
+// Returns structured array:
+// [
+//     'operation' => [
+//         'date' => '2024-01-15',
+//         'time' => '11:47:12',
+//         'spei_key' => '40002',
+//         'tracking_key' => '1234567890',
+//         'certificate_num' => '00001000000000000000',
+//     ],
+//     'beneficiary' => [
+//         'bank' => 'BANAMEX',
+//         'name' => 'NOMBRE APELLIDO APELLIDO',
+//         'account_type' => '40',
+//         'account' => '012345678901234567',
+//         'rfc' => 'XAXX010101000',
+//         'curp' => null, // If available in XML
+//         'concept' => 'Transferencia',
+//         'iva' => '0.00',
+//         'amount' => '1500.00',
+//     ],
+//     'sender' => [
+//         'bank' => 'BBVA BANCOMER',
+//         'name' => 'NOMBRE APELLIDO APELLIDO',
+//         'account_type' => '40',
+//         'account' => '012345678909876543',
+//         'rfc' => 'XAXX010101000',
+//         'curp' => null, // If available in XML
+//     ],
+// ]
+
+// Access specific details
+echo "Sender: " . $details['sender']['name'];
+echo "Sender RFC: " . $details['sender']['rfc'];
+echo "Beneficiary: " . $details['beneficiary']['name'];
+echo "Beneficiary RFC: " . $details['beneficiary']['rfc'];
+echo "Amount: " . $details['beneficiary']['amount'];
+```
+
+### Parse XML Directly
+
+If you already have XML content, you can parse it directly:
+
+```php
+$xmlContent = '<?xml version="1.0" encoding="UTF-8"?>...';
+$details = $cepService->parsePaymentXml($xmlContent);
 ```
 
 ### Date Formatting
@@ -197,6 +360,15 @@ $result = $cepService->queryPayment($formData, $options);
 - **cuenta**: Must be 18 digits for CLABE format
 - **monto**: Must be numeric (commas allowed)
 
+### Optional Fields for File Downloads
+
+When using `downloadPaymentFile()` or `getPaymentDetails()`, you can optionally include:
+
+| Field | Type | Description | Default |
+|-------|------|-------------|---------|
+| `receptorParticipante` | integer | Receiver participant flag | `0` |
+| `tipoConsulta` | integer | Query type flag | `1` |
+
 ## Response Format
 
 ### Successful Query (Payment Found)
@@ -228,6 +400,46 @@ $result = $cepService->queryPayment($formData, $options);
 null
 ```
 
+### Payment Details Response (getPaymentDetails)
+
+```php
+[
+    'operation' => [
+        'date' => '2024-01-15',
+        'time' => '11:47:12',
+        'spei_key' => '40002',
+        'tracking_key' => '1234567890',
+        'certificate_num' => '00001000000000000000',
+    ],
+    'beneficiary' => [
+        'bank' => 'BANAMEX',
+        'name' => 'NOMBRE APELLIDO APELLIDO',
+        'account_type' => '40',
+        'account' => '012345678901234567',
+        'rfc' => 'XAXX010101000',
+        'curp' => null,
+        'concept' => 'Transferencia',
+        'iva' => '0.00',
+        'amount' => '1500.00',
+    ],
+    'sender' => [
+        'bank' => 'BBVA BANCOMER',
+        'name' => 'NOMBRE APELLIDO APELLIDO',
+        'account_type' => '40',
+        'account' => '012345678909876543',
+        'rfc' => 'XAXX010101000',
+        'curp' => null,
+    ],
+]
+```
+
+### File Download Response (downloadPaymentFile)
+
+Returns raw file content as a string:
+- **XML**: UTF-8 encoded XML string
+- **PDF**: Binary PDF content
+- **ZIP**: Binary ZIP file content
+
 ## Error Handling
 
 The library throws `Exception` for various error conditions:
@@ -253,7 +465,10 @@ Common exceptions:
 - `Invalid tipoCriterio. Must be 'T' or 'R'`
 - `Invalid date format. Use dd-mm-yyyy or dd/mm/yyyy`
 - `Invalid CLABE format. Must be 18 digits`
+- `Invalid format. Must be 'XML', 'PDF', or 'ZIP'`
+- `Failed to parse XML: {errors}`
 - `CEP HTTP request failed: {message}`
+- `Failed to download {format} file: {message}`
 
 ## Configuration
 
@@ -345,6 +560,15 @@ For issues, questions, or contributions, please feel free to open a GitHub issue
 Developed for Carlos Sosa.
 
 ## Changelog
+
+### Version 1.1.0 (2025-11-30)
+- Added support for downloading payment files (XML, PDF, ZIP)
+- Added `downloadPaymentFile()` method
+- Added `getPaymentDetails()` method to extract detailed payment information
+- Added `parsePaymentXml()` method for parsing XML payment responses
+- Extract RFC, CURP, and full names from both sender and beneficiary
+- Enhanced documentation with file download examples
+- Added Laravel controller examples for file downloads
 
 ### Version 1.0.0 (2025)
 - Initial release

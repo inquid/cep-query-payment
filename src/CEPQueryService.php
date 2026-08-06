@@ -368,6 +368,203 @@ class CEPQueryService
     }
 
     /**
+     * Download payment file (XML, PDF, or ZIP format).
+     *
+     * @param array $formData Same form data as queryPayment
+     * @param string $format 'XML', 'PDF', or 'ZIP'
+     * @param array $options Optional timeout override
+     * @return string Raw file content
+     *
+     * @throws Exception
+     */
+    public function downloadPaymentFile(array $formData, string $format = 'XML', array $options = []): string {
+        $this->validateFormData($formData);
+
+        $format = strtoupper($format);
+        if (!in_array($format, ['XML', 'PDF', 'ZIP'], true)) {
+            throw new Exception("Invalid format. Must be 'XML', 'PDF', or 'ZIP'");
+        }
+
+        $timeout = $options['timeout'] ?? $this->timeout;
+        $jar = new CookieJar();
+
+        try {
+            // Warm up session
+            $this->http->get('/cep/', [
+                'cookies' => $jar,
+                'timeout' => $timeout,
+            ]);
+
+            // tipoConsulta = 1 puts the session in "Descargar CEP" mode. This POST is what
+            // loads the CEP into the server-side session; descarga.do reads it from there and
+            // ignores any parameters of its own besides `formato`. Skipping it makes
+            // descarga.do return a 500.
+            $payload = [
+                'captcha'              => '',
+                'criterio'             => $formData['criterio'],
+                'cuenta'               => $formData['cuenta'],
+                'emisor'               => $formData['emisor'],
+                'fecha'                => $formData['fecha'],
+                'monto'                => $formData['monto'],
+                'receptor'             => $formData['receptor'],
+                'receptorParticipante' => $formData['receptorParticipante'] ?? 0,
+                'tipoConsulta'         => $formData['tipoConsulta'] ?? 1,
+                'tipoCriterio'         => $formData['tipoCriterio'],
+            ];
+
+            $this->log('debug', "Downloading {$format} file", [
+                'payload' => $this->sanitizeLogData($payload),
+                'format'  => $format,
+            ]);
+
+            $valida = $this->http->post('/cep/valida.do', [
+                'cookies'     => $jar,
+                'timeout'     => $timeout,
+                'headers'     => [
+                    'Content-Type'     => 'application/x-www-form-urlencoded; charset=UTF-8',
+                    'X-Requested-With' => 'XMLHttpRequest',
+                    'Origin'           => $this->baseUri,
+                    'Referer'          => $this->baseUri . '/cep/',
+                    'Sec-Fetch-Site'   => 'same-origin',
+                    'Sec-Fetch-Mode'   => 'cors',
+                    'Sec-Fetch-Dest'   => 'empty',
+                ],
+                'form_params' => $payload,
+            ]);
+
+            $validaHtml = (string)$valida->getBody();
+
+            // The CEP-mode page offers descarga.do links for each format. If they are absent the
+            // payment was not found, and going ahead would only produce an opaque 500.
+            if (!str_contains($validaHtml, 'descarga.do?formato')) {
+                $message = trim(preg_replace('/\s+/', ' ', strip_tags($validaHtml)));
+
+                $this->log('error', 'CEP not available for download', [
+                    'response' => mb_substr($message, 0, 300),
+                ]);
+
+                throw new Exception(
+                    'CEP is not available for download. Banxico responded: '
+                    . (($message !== '') ? mb_substr($message, 0, 300) : 'empty response')
+                );
+            }
+
+            // descarga.do is GET-only (POST returns 405) and takes only the `formato` query
+            // parameter; everything else comes from the session established above.
+            $response = $this->http->get('/cep/descarga.do', [
+                'cookies' => $jar,
+                'timeout' => $timeout,
+                'query'   => ['formato' => $format],
+                'headers' => [
+                    'Origin'         => $this->baseUri,
+                    'Referer'        => $this->baseUri . '/cep/valida.do',
+                    'Sec-Fetch-Site' => 'same-origin',
+                    'Sec-Fetch-Mode' => 'navigate',
+                    'Sec-Fetch-Dest' => 'document',
+                ],
+            ]);
+
+            $content = (string)$response->getBody();
+
+            $this->log('info', "{$format} file downloaded successfully", [
+                'size'     => strlen($content),
+                'filename' => $response->getHeaderLine('Content-Disposition'),
+            ]);
+
+            return $content;
+        } catch (GuzzleException $e) {
+            $this->log('error', 'Download file request failed', [
+                'error'  => $e->getMessage(),
+                'format' => $format,
+            ]);
+
+            throw new Exception("Failed to download {$format} file: " . $e->getMessage(), 0, $e);
+        }
+    }
+
+    /**
+     * Download and parse XML payment file to extract payment details.
+     *
+     * @param array $formData Same form data as queryPayment
+     * @param array $options Optional timeout override
+     * @return array Parsed payment details with beneficiary and sender information
+     *
+     * @throws Exception
+     */
+    public function getPaymentDetails(array $formData, array $options = []): array {
+        $xmlContent = $this->downloadPaymentFile($formData, 'XML', $options);
+
+        return $this->parsePaymentXml($xmlContent);
+    }
+
+    /**
+     * Parse XML payment response to extract details.
+     *
+     * @param string $xmlContent Raw XML content
+     * @return array Structured payment details
+     *
+     * @throws Exception
+     */
+    public function parsePaymentXml(string $xmlContent): array {
+        libxml_use_internal_errors(true);
+
+        $xml = simplexml_load_string($xmlContent);
+
+        if ($xml === false) {
+            $errors = libxml_get_errors();
+            libxml_clear_errors();
+            throw new Exception('Failed to parse XML: ' . json_encode($errors));
+        }
+
+        $details = [
+            'operation' => [
+                'date'            => (string)$xml['FechaOperacion'] ?? null,
+                'time'            => (string)$xml['Hora'] ?? null,
+                'spei_key'        => (string)$xml['ClaveSPEI'] ?? null,
+                'tracking_key'    => (string)$xml['claveRastreo'] ?? null,
+                'certificate_num' => (string)$xml['numeroCertificado'] ?? null,
+            ],
+            'beneficiary' => [],
+            'sender'      => [],
+        ];
+
+        // Parse beneficiary (receiver)
+        if (isset($xml->Beneficiario)) {
+            $beneficiary = $xml->Beneficiario;
+            $details['beneficiary'] = [
+                'bank'         => trim((string)$beneficiary['BancoReceptor'] ?? ''),
+                'name'         => (string)$beneficiary['Nombre'] ?? null,
+                'account_type' => (string)$beneficiary['TipoCuenta'] ?? null,
+                'account'      => (string)$beneficiary['Cuenta'] ?? null,
+                'rfc'          => (string)$beneficiary['RFC'] ?? null,
+                'curp'         => (string)$beneficiary['CURP'] ?? null,
+                'concept'      => (string)$beneficiary['Concepto'] ?? null,
+                'iva'          => (string)$beneficiary['IVA'] ?? null,
+                'amount'       => (string)$beneficiary['MontoPago'] ?? null,
+            ];
+        }
+
+        // Parse sender (ordenante)
+        if (isset($xml->Ordenante)) {
+            $ordenante = $xml->Ordenante;
+            $details['sender'] = [
+                'bank'         => trim((string)$ordenante['BancoEmisor'] ?? ''),
+                'name'         => (string)$ordenante['Nombre'] ?? null,
+                'account_type' => (string)$ordenante['TipoCuenta'] ?? null,
+                'account'      => (string)$ordenante['Cuenta'] ?? null,
+                'rfc'          => (string)$ordenante['RFC'] ?? null,
+                'curp'         => (string)$ordenante['CURP'] ?? null,
+            ];
+        }
+
+        $this->log('info', 'XML payment details parsed successfully', [
+            'tracking_key' => $details['operation']['tracking_key'] ?? 'N/A',
+        ]);
+
+        return $details;
+    }
+
+    /**
      * Log a message using the provided logger or do nothing.
      */
     private function log(string $level, string $message, array $context = []): void {
