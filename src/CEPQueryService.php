@@ -518,11 +518,11 @@ class CEPQueryService
 
         $details = [
             'operation' => [
-                'date'            => (string)$xml['FechaOperacion'] ?? null,
-                'time'            => (string)$xml['Hora'] ?? null,
-                'spei_key'        => (string)$xml['ClaveSPEI'] ?? null,
-                'tracking_key'    => (string)$xml['claveRastreo'] ?? null,
-                'certificate_num' => (string)$xml['numeroCertificado'] ?? null,
+                'date'            => isset($xml['FechaOperacion']) ? (string)$xml['FechaOperacion'] : null,
+                'time'            => isset($xml['Hora']) ? (string)$xml['Hora'] : null,
+                'spei_key'        => isset($xml['ClaveSPEI']) ? (string)$xml['ClaveSPEI'] : null,
+                'tracking_key'    => isset($xml['claveRastreo']) ? (string)$xml['claveRastreo'] : null,
+                'certificate_num' => isset($xml['numeroCertificado']) ? (string)$xml['numeroCertificado'] : null,
             ],
             'beneficiary' => [],
             'sender'      => [],
