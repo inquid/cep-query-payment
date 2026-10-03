@@ -408,7 +408,7 @@ class CEPQueryService
                 'monto'                => $formData['monto'],
                 'receptor'             => $formData['receptor'],
                 'receptorParticipante' => $formData['receptorParticipante'] ?? 0,
-                'tipoConsulta'         => $formData['tipoConsulta'] ?? 1,
+                'tipoConsulta'         => 1,
                 'tipoCriterio'         => $formData['tipoCriterio'],
             ];
 
@@ -437,7 +437,7 @@ class CEPQueryService
             // The CEP-mode page offers descarga.do links for each format. If they are absent the
             // payment was not found, and going ahead would only produce an opaque 500.
             if (!str_contains($validaHtml, 'descarga.do?formato')) {
-                $message = trim(preg_replace('/\s+/', ' ', strip_tags($validaHtml)));
+                $message = $this->extractReadableText($validaHtml);
 
                 $this->log('error', 'CEP not available for download', [
                     'response' => mb_substr($message, 0, 300),
@@ -480,6 +480,21 @@ class CEPQueryService
 
             throw new Exception("Failed to download {$format} file: " . $e->getMessage(), 0, $e);
         }
+    }
+
+    /**
+     * Reduce a Banxico HTML page to the text a human can act on.
+     *
+     * strip_tags() alone keeps the contents of <script>/<style>, and Banxico inlines a large
+     * stylesheet at the top of every page — so the naive version yields nothing but CSS
+     * comments. Drop those blocks first and decode entities so messages such as
+     * "Operación no encontrada" survive intact.
+     */
+    private function extractReadableText(string $html): string {
+        $html = preg_replace('#<(script|style)\b[^>]*>.*?</\1>#is', ' ', $html) ?? $html;
+        $text = html_entity_decode(strip_tags($html), ENT_QUOTES | ENT_HTML5, 'UTF-8');
+
+        return trim(preg_replace('/\s+/u', ' ', $text));
     }
 
     /**
@@ -532,15 +547,15 @@ class CEPQueryService
         if (isset($xml->Beneficiario)) {
             $beneficiary = $xml->Beneficiario;
             $details['beneficiary'] = [
-                'bank'         => trim((string)$beneficiary['BancoReceptor'] ?? ''),
-                'name'         => (string)$beneficiary['Nombre'] ?? null,
-                'account_type' => (string)$beneficiary['TipoCuenta'] ?? null,
-                'account'      => (string)$beneficiary['Cuenta'] ?? null,
-                'rfc'          => (string)$beneficiary['RFC'] ?? null,
-                'curp'         => (string)$beneficiary['CURP'] ?? null,
-                'concept'      => (string)$beneficiary['Concepto'] ?? null,
-                'iva'          => (string)$beneficiary['IVA'] ?? null,
-                'amount'       => (string)$beneficiary['MontoPago'] ?? null,
+                'bank'         => isset($beneficiary['BancoReceptor']) ? trim((string)$beneficiary['BancoReceptor']) : null,
+                'name'         => isset($beneficiary['Nombre']) ? (string)$beneficiary['Nombre'] : null,
+                'account_type' => isset($beneficiary['TipoCuenta']) ? (string)$beneficiary['TipoCuenta'] : null,
+                'account'      => isset($beneficiary['Cuenta']) ? (string)$beneficiary['Cuenta'] : null,
+                'rfc'          => isset($beneficiary['RFC']) ? (string)$beneficiary['RFC'] : null,
+                'curp'         => isset($beneficiary['CURP']) ? (string)$beneficiary['CURP'] : null,
+                'concept'      => isset($beneficiary['Concepto']) ? (string)$beneficiary['Concepto'] : null,
+                'iva'          => isset($beneficiary['IVA']) ? (string)$beneficiary['IVA'] : null,
+                'amount'       => isset($beneficiary['MontoPago']) ? (string)$beneficiary['MontoPago'] : null,
             ];
         }
 
@@ -548,17 +563,19 @@ class CEPQueryService
         if (isset($xml->Ordenante)) {
             $ordenante = $xml->Ordenante;
             $details['sender'] = [
-                'bank'         => trim((string)$ordenante['BancoEmisor'] ?? ''),
-                'name'         => (string)$ordenante['Nombre'] ?? null,
-                'account_type' => (string)$ordenante['TipoCuenta'] ?? null,
-                'account'      => (string)$ordenante['Cuenta'] ?? null,
-                'rfc'          => (string)$ordenante['RFC'] ?? null,
-                'curp'         => (string)$ordenante['CURP'] ?? null,
+                'bank'         => isset($ordenante['BancoEmisor']) ? trim((string)$ordenante['BancoEmisor']) : null,
+                'name'         => isset($ordenante['Nombre']) ? (string)$ordenante['Nombre'] : null,
+                'account_type' => isset($ordenante['TipoCuenta']) ? (string)$ordenante['TipoCuenta'] : null,
+                'account'      => isset($ordenante['Cuenta']) ? (string)$ordenante['Cuenta'] : null,
+                'rfc'          => isset($ordenante['RFC']) ? (string)$ordenante['RFC'] : null,
+                'curp'         => isset($ordenante['CURP']) ? (string)$ordenante['CURP'] : null,
             ];
         }
 
         $this->log('info', 'XML payment details parsed successfully', [
-            'tracking_key' => $details['operation']['tracking_key'] ?? 'N/A',
+            'tracking_key' => isset($details['operation']['tracking_key'])
+                ? '***' . substr($details['operation']['tracking_key'], -3)
+                : 'N/A',
         ]);
 
         return $details;

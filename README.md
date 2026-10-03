@@ -152,7 +152,7 @@ class PaymentController extends Controller
             'monto' => $request->amount,
         ];
 
-        $format = $request->format ?? 'PDF'; // XML, PDF, or ZIP
+        $format = strtoupper($request->format ?? 'PDF'); // XML, PDF, or ZIP
 
         try {
             $content = $this->cepService->downloadPaymentFile($formData, $format);

@@ -111,8 +111,11 @@ User Request
     │       │
     │       ├─> HTTP GET /cep/                  [Warm up session]
     │       │
-    │       ├─> HTTP POST /cep/descarga.do?formato={format}
-    │       │       │                          [Submit form]
+    │       ├─> HTTP POST /cep/valida.do        [Arm download session,
+    │       │                                    tipoConsulta=1]
+    │       │
+    │       ├─> HTTP GET /cep/descarga.do?formato={format}
+    │       │       │                          [Fetch file from session]
     │       │       │
     │       │       └─> Receive file content (XML/PDF/ZIP)
     │       │
