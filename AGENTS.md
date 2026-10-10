@@ -1,6 +1,6 @@
-# CLAUDE.md
+# AGENTS.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+This file provides guidance to Codex (Codex.ai/code) when working with code in this repository.
 
 ## What this is
 
@@ -43,7 +43,6 @@ Effectively one class: `src/CEPQueryService.php` (~540 lines). Everything else i
 | `/cep/valida.do` | POST form | Payment lookup (`tipoConsulta=0`) **and** CEP-mode session setup (`tipoConsulta=1`) |
 | `/cep/instituciones.do?fecha=` | GET | Bank list as JSON (`instituciones` = array of `[id, name]` pairs) |
 | `/cep/descarga.do?formato=` | GET | XML/PDF/ZIP receipt download; **session-driven, takes only `formato`** |
-| `/validador-cep-spei/Validador` | POST multipart | Seal validation of CEP XMLs (`file[N]`); stateless, no warm-up |
 
 The cookie warm-up is mandatory: `valida.do` and `descarga.do` reject requests without a session cookie from
 `/cep/`. Requests also carry browser-mimicking headers (`User-Agent`, `X-Requested-With`, `Origin`, `Referer`,
@@ -54,18 +53,6 @@ serves whatever CEP the *session* is holding. You must POST `valida.do` with `ti
 CEP" mode); that response is a small page of `descarga.do?formato=PDF|XML|ZIP` links and is the signal the CEP
 is ready. Calling `descarga.do` without that POST returns a **500**, not a 4xx. It is also GET-only — POST
 returns 405. `tipoConsulta=0` is the ordinary status query and does *not* arm the download.
-
-**The validator (`validateCepXml()` / `validateCepXmlBatch()`) is a separate app** under
-`/validador-cep-spei/`. It needs no cookies. The POST response *is* the results page: a `.formatted-table`
-summary (Total / Válidos / Inválidos) and `#comprobantesCEP` rows of `[filename, marker, Ver Detalle button]`.
-The marker is a checked `<input type="checkbox">` when valid and the text `X` otherwise. The detail table
-(Cadena Original, Sello digital, Certificado utilizado, Nota) only exists as an HTML string inside the button's
-`onclick`. Rows are **not** in upload order, so files are renamed `cep-N.xml` and matched back by name. Any
-malformed file makes the whole batch return a 500 (`Error en el formato del archivo: ...`), so XML is
-pre-checked locally. The parser cross-checks the row markers against the summary counts and throws on any
-mismatch. It is a security check and must fail closed. GET on the same endpoint returns `100#<privacy url>`
-(the file limit). The checks were confirmed live: a genuine CEP comes back valid, and the same file with only
-`MontoPago` edited comes back invalid.
 
 There is a second, unrelated download on the `tipoConsulta=0` results page: a POST to
 `descargaComprobanteSPEI.do` with `htmlCEPImprimir` set to the client-side inner HTML of `#consultaMISPEI`. It

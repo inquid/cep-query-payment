@@ -11,6 +11,7 @@ This library provides a simple interface to query the SPEI payment system throug
 - ✅ Query payment status using tracking key or reference number
 - ✅ Download payment files (XML, PDF, ZIP)
 - ✅ Extract detailed payment information from XML (RFC, CURP, names)
+- ✅ Verify a CEP XML is genuine with Banxico's official validator
 - ✅ Retrieve available bank options from CEP system
 - ✅ Automatic form validation and data sanitization
 - ✅ Lightweight HTTP-based approach (no browser required)
@@ -295,6 +296,49 @@ $xmlContent = '<?xml version="1.0" encoding="UTF-8"?>...';
 $details = $cepService->parsePaymentXml($xmlContent);
 ```
 
+### Validate a CEP XML
+
+Check that a CEP XML (for example, one a customer sent you) is genuine and untampered, using Banxico's
+[validador de CEP](https://www.banxico.org.mx/validador-cep-spei/). Banxico verifies the file's digital
+seal, so changing any field (amount, account, name) makes it invalid.
+
+```php
+$xml = file_get_contents('CEP-20261009-XXXX.xml');
+$result = $cepService->validateCepXml($xml);
+
+if ($result['valid']) {
+    // Seal is valid. Now check it is the payment you expected:
+    $details = $cepService->parsePaymentXml($xml);
+}
+
+// [
+//     'valid'          => true,
+//     'note'           => 'Comprobante Electrónico de Pago Válido',
+//     'original_chain' => '||1|09102026|...',   // cadena original
+//     'seal'           => 'AbCd...',            // sello digital
+//     'certificate'    => '00001000000000000000',
+// ]
+```
+
+A valid seal only proves Banxico issued the CEP. It does not prove the payment is the one you are waiting
+for, so always compare amount, beneficiary account and date from `parsePaymentXml()` with your own records.
+
+Validate up to 100 files in one request; keys are preserved:
+
+```php
+$batch = $cepService->validateCepXmlBatch([
+    'order-1001' => $xmlA,
+    'order-1002' => $xmlB,
+]);
+
+// $batch['summary'] => ['total' => 2, 'valid' => 1, 'invalid' => 1]
+// $batch['results']['order-1002']['valid'] => false
+```
+
+Files that are not well-formed XML are rejected before contacting Banxico. A file Banxico can't read as a
+CEP fails the whole request with an `Exception` naming its key. If the results page doesn't match what was
+sent (for example, Banxico changes its markup), the method throws instead of guessing.
+
 ### Date Formatting
 
 ```php
@@ -560,6 +604,9 @@ For issues, questions, or contributions, please feel free to open a GitHub issue
 Developed for Carlos Sosa.
 
 ## Changelog
+
+### Unreleased
+- Added `validateCepXml()` and `validateCepXmlBatch()` to verify CEP XMLs with Banxico's validator
 
 ### Version 1.1.0 (2025-11-30)
 - Added support for downloading payment files (XML, PDF, ZIP)

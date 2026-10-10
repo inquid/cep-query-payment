@@ -27,7 +27,8 @@
         "php": "^8.2",
         "illuminate/support": "^11.0|^12.0",
         "symfony/process": "^7.0",
-        "nesbot/carbon": "^3.10"
+        "nesbot/carbon": "^3.10",
+        "ext-dom": "*"
     },
     "require-dev": {
         "orchestra/testbench": "^9.0|^10.0",

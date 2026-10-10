@@ -4,15 +4,26 @@ namespace Carlosupreme\CEPQueryPayment;
 
 use Carbon\Carbon;
 use DateTime;
+use DOMDocument;
+use DOMElement;
+use DOMXPath;
 use Exception;
 use GuzzleHttp\Client;
 use GuzzleHttp\Cookie\CookieJar;
+use GuzzleHttp\Exception\BadResponseException;
 use GuzzleHttp\Exception\GuzzleException;
 
+use RuntimeException;
 use function Symfony\Component\Clock\now;
 
 class CEPQueryService
 {
+    // Banxico's validator advertises its file limit via GET /validador-cep-spei/Validador
+    // ("100#<privacy notice url>") and caps each file at 1 MB in its upload widget.
+    private const VALIDATOR_MAX_FILES = 100;
+
+    private const VALIDATOR_MAX_FILE_BYTES = 1024 * 1024;
+
     private Client $http;
 
     private int $timeout;
@@ -236,14 +247,14 @@ class CEPQueryService
         }
 
         libxml_use_internal_errors(true);
-        $dom = new \DOMDocument('1.0', 'UTF-8');
+        $dom = new DOMDocument('1.0', 'UTF-8');
 
         if (!$dom->loadHTML($html, LIBXML_NOWARNING | LIBXML_NOERROR)) {
             $content = trim(strip_tags($html));
             return $content !== '' ? ['type' => 'text', 'content' => $content] : null;
         }
 
-        $xpath = new \DOMXPath($dom);
+        $xpath = new DOMXPath($dom);
 
         // Specific table with payment info (matches sample HTML)
         $table = $xpath->query("//div[@id='consultaMISPEI']//table[@id='xxx' or contains(@class,'styled-table')]")
@@ -251,7 +262,7 @@ class CEPQueryService
             ?: $xpath->query("//div[@id='consultaMISPEI']//table")->item(0)
                 ?: $xpath->query('//table')->item(0);
 
-        if (!$table instanceof \DOMElement) {
+        if (!$table instanceof DOMElement) {
             $text = trim($xpath->evaluate('string(//div[@id="consultaMISPEI"] | //div[@class="cuerpo-msg"] | //body)'));
 
             return [
@@ -269,7 +280,7 @@ class CEPQueryService
         }
 
         foreach ($rowNodes as $rowNode) {
-            /** @var \DOMElement $rowNode */
+            /** @var DOMElement $rowNode */
             $cellNodes = $xpath->query('.//td|.//th', $rowNode);
             if ($cellNodes->length < 2) {
                 continue;
@@ -579,6 +590,241 @@ class CEPQueryService
         ]);
 
         return $details;
+    }
+
+    /**
+     * Validate a CEP XML against Banxico's validator (validador-cep-spei).
+     *
+     * This checks Banxico's digital seal, i.e. that the file is a genuine, untampered CEP.
+     * It does not check that the payment matches what you expected — compare the fields
+     * from parsePaymentXml() against your own records for that.
+     *
+     * @param string $xmlContent Raw CEP XML content
+     * @param array $options Optional timeout override
+     * @return array{valid: bool, note: ?string, original_chain: ?string, seal: ?string, certificate: ?string}
+     *
+     * @throws Exception
+     */
+    public function validateCepXml(string $xmlContent, array $options = []): array {
+        return $this->validateCepXmlBatch([$xmlContent], $options)['results'][0];
+    }
+
+    /**
+     * Validate several CEP XMLs in a single request to Banxico's validator.
+     *
+     * @param array<array-key, string> $xmlContents Raw CEP XML contents; keys are preserved in the results
+     * @param array $options Optional timeout override
+     * @return array{summary: array{total: int, valid: int, invalid: int}, results: array}
+     *
+     * @throws Exception
+     */
+    public function validateCepXmlBatch(array $xmlContents, array $options = []): array {
+        if ($xmlContents === []) {
+            throw new Exception('At least one CEP XML is required');
+        }
+
+        if (count($xmlContents) > self::VALIDATOR_MAX_FILES) {
+            throw new Exception('Banxico validates at most ' . self::VALIDATOR_MAX_FILES . ' CEPs per request');
+        }
+
+        $timeout = $options['timeout'] ?? $this->timeout;
+
+        // Banxico reports results by filename and not in upload order, so every file gets a
+        // generated unique name that maps back to its key.
+        $multipart = [];
+        $keysByFilename = [];
+
+        foreach (array_values(array_keys($xmlContents)) as $i => $key) {
+            $xml = $xmlContents[$key];
+
+            if (!is_string($xml) || trim($xml) === '') {
+                throw new Exception("CEP XML [{$key}] is empty");
+            }
+
+            if (strlen($xml) > self::VALIDATOR_MAX_FILE_BYTES) {
+                throw new Exception("CEP XML [{$key}] exceeds Banxico's 1 MB limit");
+            }
+
+            // A malformed file makes Banxico fail the whole batch with a 500, so reject it here
+            // where we can still say which one it was.
+            libxml_use_internal_errors(true);
+            $parsed = simplexml_load_string($xml);
+            libxml_clear_errors();
+
+            if ($parsed === false) {
+                throw new Exception("CEP XML [{$key}] is not well-formed XML");
+            }
+
+            $filename = "cep-{$i}.xml";
+            $keysByFilename[$filename] = $key;
+
+            $multipart[] = [
+                'name'     => "file[{$i}]",
+                'contents' => $xml,
+                'filename' => $filename,
+                'headers'  => ['Content-Type' => 'text/xml'],
+            ];
+        }
+
+        $this->log('debug', 'Sending CEP XMLs to validator', ['count' => count($multipart)]);
+
+        try {
+            $response = $this->http->post('/validador-cep-spei/Validador', [
+                'timeout'   => $timeout,
+                'multipart' => $multipart,
+                'headers'   => [
+                    'Origin'         => $this->baseUri,
+                    'Referer'        => $this->baseUri . '/validador-cep-spei/',
+                    'Sec-Fetch-Site' => 'same-origin',
+                    'Sec-Fetch-Mode' => 'cors',
+                    'Sec-Fetch-Dest' => 'empty',
+                ],
+            ]);
+        } catch (BadResponseException $e) {
+            // Files Banxico can't read as a CEP come back as a 500 with an explanation such as
+            // "Error en el formato del archivo: cep-0.xml, verifique!".
+            $message = $this->extractReadableText((string)$e->getResponse()->getBody());
+            $message = strtr($message, array_map(fn ($key) => "[{$key}]", $keysByFilename));
+
+            $this->log('error', 'CEP validator rejected the request', [
+                'status'   => $e->getResponse()->getStatusCode(),
+                'response' => mb_substr($message, 0, 300),
+            ]);
+
+            throw new Exception(
+                'CEP validator rejected the request. Banxico responded: '
+                . ($message !== '' ? mb_substr($message, 0, 300) : 'empty response'),
+                0,
+                $e
+            );
+        } catch (GuzzleException $e) {
+            $this->log('error', 'CEP validator request failed', ['error' => $e->getMessage()]);
+
+            throw new Exception('CEP validator request failed: ' . $e->getMessage(), 0, $e);
+        }
+
+        $result = $this->parseValidatorResponse((string)$response->getBody(), $keysByFilename);
+
+        $this->log('info', 'CEP validation completed', $result['summary']);
+
+        return $result;
+    }
+
+    /**
+     * Parse the validator's results page.
+     *
+     * Each row holds the filename, a validity marker (a checked checkbox when the seal is
+     * valid, an "X" otherwise) and a "Ver Detalle" button whose onclick carries the detail
+     * table as an HTML string. A summary table above it gives Total / Válidos / Inválidos,
+     * which is used to cross-check the per-row markers: this is a security check, so a
+     * page we can't fully account for is an error rather than a guess.
+     *
+     * @throws Exception
+     */
+    private function parseValidatorResponse(string $html, array $keysByFilename): array {
+        $dom = $this->loadHtmlUtf8($html);
+        $xpath = new DOMXPath($dom);
+
+        $counts = [];
+        foreach ($xpath->query("//table[contains(@class,'formatted-table')]//tbody//tr[1]/td") as $td) {
+            $counts[] = (int)trim($td->textContent);
+        }
+
+        if (count($counts) < 3) {
+            throw new Exception('Unexpected CEP validator response: summary table not found');
+        }
+
+        $summary = ['total' => $counts[0], 'valid' => $counts[1], 'invalid' => $counts[2]];
+
+        $results = [];
+        foreach ($xpath->query("//table[@id='comprobantesCEP']//tbody/tr") as $row) {
+            // Commented-out columns are DOM comments, not cells, so the positions are stable.
+            $cells = $xpath->query('./td', $row);
+            if ($cells->length < 3) {
+                continue;
+            }
+
+            $filename = trim($cells->item(0)->textContent);
+            if (!array_key_exists($filename, $keysByFilename)) {
+                throw new RuntimeException("Unexpected CEP validator response: unknown file '{$filename}'");
+            }
+
+            $details = $this->parseValidatorDetail($xpath, $cells->item(2));
+
+            $hasCheckedBox = $xpath->query(".//input[@type='checkbox' and @checked]", $cells->item(1))->length > 0;
+            $markedInvalid = strtoupper(trim($cells->item(1)->textContent)) === 'X';
+
+            if ($hasCheckedBox === $markedInvalid) {
+                throw new RuntimeException("Unexpected CEP validator response: unrecognized validity marker for '{$filename}'");
+            }
+
+            $results[$keysByFilename[$filename]] = [
+                'valid'          => $hasCheckedBox,
+                'note'           => $details['Nota'] ?? null,
+                'original_chain' => $details['Cadena Original'] ?? null,
+                'seal'           => $details['Sello digital'] ?? null,
+                'certificate'    => $details['Certificado utilizado'] ?? null,
+            ];
+        }
+
+        $validCount = count(array_filter($results, fn ($r) => $r['valid']));
+
+        if (count($results) !== count($keysByFilename)
+            || $summary['total'] !== count($results)
+            || $summary['valid'] !== $validCount) {
+            throw new Exception(sprintf(
+                'Unexpected CEP validator response: sent %d files, summary reports %d (%d valid), parsed %d (%d valid)',
+                count($keysByFilename), $summary['total'], $summary['valid'], count($results), $validCount
+            ));
+        }
+
+        // Restore the caller's order; Banxico's is arbitrary.
+        $ordered = [];
+        foreach ($keysByFilename as $key) {
+            $ordered[$key] = $results[$key];
+        }
+
+        return ['summary' => $summary, 'results' => $ordered];
+    }
+
+    /**
+     * Extract the label => value pairs from a "Ver Detalle" button's onclick payload.
+     */
+    private function parseValidatorDetail(DOMXPath $xpath, \DOMNode $cell): array {
+        $button = $xpath->query('.//button[@onclick]', $cell)->item(0);
+        if (!$button instanceof DOMElement) {
+            return [];
+        }
+
+        // The parser has already decoded entities in the attribute value.
+        if (!preg_match("/openModalDetalleCEP\('(.*)'\)/s", $button->getAttribute('onclick'), $m)) {
+            return [];
+        }
+
+        $detailXpath = new DOMXPath($this->loadHtmlUtf8('<table>' . $m[1] . '</table>'));
+
+        $details = [];
+        foreach ($detailXpath->query('//tr') as $tr) {
+            $tds = $detailXpath->query('./td', $tr);
+            if ($tds->length >= 2) {
+                $details[trim($tds->item(0)->textContent)] = trim($tds->item(1)->textContent);
+            }
+        }
+
+        return $details;
+    }
+
+    /**
+     * DOMDocument::loadHTML() assumes ISO-8859-1 unless told otherwise.
+     */
+    private function loadHtmlUtf8(string $html): DOMDocument {
+        libxml_use_internal_errors(true);
+
+        $dom = new DOMDocument('1.0', 'UTF-8');
+        $dom->loadHTML('<?xml encoding="UTF-8">' . $html, LIBXML_NOWARNING | LIBXML_NOERROR);
+        libxml_clear_errors();
+
+        return $dom;
     }
 
     /**
